@@ -1,0 +1,354 @@
+"""
+Simplified TD Snap database utilities for PowerPoint app
+Adapted from streamlit-tdpages/TDutils.py
+"""
+
+import sqlite3
+import uuid
+import os
+import datetime
+import tempfile
+import shutil
+from colour_simple import get_color_for_slide, rgb_to_int, int_to_rgb
+
+
+def get_static_path(fname):
+    """Get path to file in static directory."""
+    fname = os.path.join(os.path.dirname(__file__), 'static/' + fname)
+    fname = os.path.abspath(fname)
+    return fname
+
+
+def create_temp_file(file_obj, extension='.spb'):
+    """Create a temporary file from uploaded file object."""
+    temp_dir = tempfile.gettempdir()
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    temp_filename = f"pageset_{timestamp}{extension}"
+    temp_path = os.path.join(temp_dir, temp_filename)
+
+    with open(temp_path, 'wb') as f:
+        f.write(file_obj.getvalue())
+
+    return temp_path
+
+
+def get_page_layout_details(db_filename):
+    """
+    Get page ID and layout details from TD Snap database.
+
+    Returns:
+        tuple: (pageId, layouts)
+            pageId: int
+            layouts: list of tuples (pageLayoutId, num_columns, num_rows)
+    """
+    conn = sqlite3.connect(db_filename)
+    cursor = conn.cursor()
+
+    # Select rows from Page table excluding ignored titles
+    rows_to_ignore = ['Dashboard', 'Message Bar']
+    query = "SELECT Id, Title FROM Page WHERE Title NOT IN ({})".format(','.join('?' for _ in rows_to_ignore))
+    cursor.execute(query, rows_to_ignore)
+    rows = cursor.fetchall()
+
+    if len(rows) == 0:
+        conn.close()
+        raise ValueError("Error: Couldn't find Page row")
+    if len(rows) != 1:
+        error_message = 'Error: Found multiple Page IDs in file: ' + ', '.join(row[1] for row in rows)
+        conn.close()
+        raise ValueError(error_message)
+
+    pageId = rows[0][0]
+
+    # Retrieve PageLayoutSetting for the unique Id
+    cursor.execute("SELECT Id, PageLayoutSetting FROM PageLayout WHERE PageId = ?", (pageId,))
+    settings = cursor.fetchall()
+
+    # Organize data into a list of (pageLayoutId, num_columns, num_rows)
+    layouts = [(setting[0], *map(int, setting[1].split(',')[:2])) for setting in settings]
+
+    conn.close()
+    return pageId, layouts
+
+
+def find_available_positions(db_filename, pageLayoutId, ncols, nrows):
+    """
+    Find available grid positions for buttons.
+
+    Args:
+        db_filename: Path to TD Snap database
+        pageLayoutId: Page layout ID
+        ncols: Number of columns
+        nrows: Number of rows
+
+    Returns:
+        list: Available (col, row) positions
+    """
+    # Generate all possible positions across 10 pages
+    npages = 10
+    all_positions = [
+        (c, r) for r in range(nrows * npages) for c in range(ncols)
+        if not (
+            # Exclude bottom right of any page
+            (c == ncols - 1 and r % nrows == nrows - 1) or
+            # Exclude top right of any page except the first one
+            (c == ncols - 1 and r % nrows == 0 and r != 0)
+        )
+    ]
+
+    # Connect to DB and fetch occupied positions
+    conn = sqlite3.connect(db_filename)
+    cursor = conn.cursor()
+    cursor.execute("SELECT GridPosition FROM ElementPlacement WHERE PageLayoutId = ?", (pageLayoutId,))
+    occupied_positions_raw = cursor.fetchall()
+
+    # Parse 'c, r' format and convert to list of tuples
+    occupied_positions = []
+    for pos_raw in occupied_positions_raw:
+        c, r = map(int, pos_raw[0].split(','))
+        occupied_positions.append((c, r))
+
+    # Filter out occupied positions
+    available_positions = [pos for pos in all_positions if pos not in occupied_positions]
+
+    conn.close()
+    return available_positions
+
+
+def add_button(cursor, buttonId, refId, label, message, symbol=None):
+    """
+    Add a button to the database.
+
+    Args:
+        cursor: Database cursor
+        buttonId: Button ID
+        refId: Element reference ID
+        label: Button label text
+        message: Message to speak when button pressed
+        symbol: Library symbol ID (optional, None for no symbol)
+    """
+    label_ownership = 0 if label is None else 3
+    image_ownership = 0 if symbol is None else 3
+
+    new_uuid = str(uuid.uuid1())
+    cursor.execute("""
+        INSERT INTO Button (Id, Label, Message, ImageOwnership, BorderColor, BorderThickness, LabelOwnership, CommandFlags, ContentType, UniqueId, ElementReferenceId, ActiveContentType, LibrarySymbolId, PageSetImageId, SymbolColorDataId, MessageRecordingId)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (buttonId, label, message, image_ownership, '-132102', 0.0, label_ownership, 8, 6, new_uuid, refId, 0, symbol, 0, 0, 0))
+
+
+def add_command_speak_message(cursor, buttonId):
+    """Add 'speak message' command to button."""
+    content = '\'{"$type":"1","$values":[{"$type":"3","MessageAction":0}]}\''
+    cursor.execute("""
+        INSERT INTO CommandSequence (SerializedCommands, ButtonId)
+        VALUES ({}, "{}")
+    """.format(content, buttonId))
+
+
+def add_element_reference(cursor, refId, pageId, color):
+    """
+    Add element reference with specified color.
+
+    Args:
+        cursor: Database cursor
+        refId: Element reference ID
+        pageId: Page ID
+        color: Background color (32-bit integer)
+    """
+    foregroundColor = '-14934754'  # Standard foreground color
+
+    cursor.execute("""
+        INSERT INTO ElementReference
+        (Id, ElementType, ForegroundColor, BackgroundColor, AudioCueRecordingId, PageId)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (refId, 0, foregroundColor, color, 0, pageId))
+
+
+def add_button_placement(cursor, pageLayoutId, elementRefId, position):
+    """
+    Place button on grid.
+
+    Args:
+        cursor: Database cursor
+        pageLayoutId: Page layout ID
+        elementRefId: Element reference ID
+        position: (col, row) tuple
+    """
+    c, r = position
+    cursor.execute(f"""
+        INSERT INTO ElementPlacement
+        (GridPosition, GridSpan, Visible, ElementReferenceId, PageLayoutId)
+        VALUES ('{c},{r}', '1,1', '1', '{elementRefId}', '{pageLayoutId}')
+    """)
+
+
+def get_next_id(cursor, table_name):
+    """Get next available ID from sqlite_sequence table."""
+    cursor.execute("SELECT seq FROM sqlite_sequence WHERE name=?", (table_name,))
+    result = cursor.fetchone()
+
+    next_id = 1
+    if result is not None:
+        next_id = result[0] + 1
+
+    return next_id
+
+
+def dt_to_filetime(dt):
+    """Convert Python datetime to Windows FILETIME."""
+    delta = dt - datetime.datetime(1, 1, 1)
+    filetime = int(delta.total_seconds() * 10**7)
+    return filetime
+
+
+def get_timestamp():
+    """Get current timestamp in Windows FILETIME format."""
+    return dt_to_filetime(datetime.datetime.now())
+
+
+def update_timestamps(filename):
+    """Update all synchronization timestamps in pageset to current time."""
+    try:
+        conn = sqlite3.connect(filename)
+        cursor = conn.cursor()
+
+        new_timestamp = get_timestamp()
+        cursor.execute("UPDATE Page SET TimeStamp = ?", (new_timestamp,))
+        cursor.execute("UPDATE Synchronization SET PageSetTimestamp = ?", (new_timestamp,))
+        cursor.execute("UPDATE PageSetProperties SET TimeStamp = ?", (new_timestamp,))
+
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_page_title(db_path, new_name, page_set_id=1):
+    """Update the pageset title."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        # Update the FriendlyName in PageSetProperties
+        cursor.execute("UPDATE PageSetProperties SET FriendlyName = ? WHERE ID = ?",
+                      (new_name, page_set_id))
+
+        # Find page where Title is not 'Dashboard' or 'Message Bar'
+        cursor.execute("SELECT Id FROM Page WHERE Title NOT IN ('Dashboard', 'Message Bar')")
+        page_row = cursor.fetchone()
+
+        if page_row:
+            page_id = page_row[0]
+            cursor.execute("UPDATE Page SET Title = ? WHERE Id = ?", (new_name, page_id))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def add_home_button(pageset_db_filename, reference_db_filename):
+    """Copy home button from reference database to pageset."""
+    pageId, layouts = get_page_layout_details(pageset_db_filename)
+
+    conn_pageset = sqlite3.connect(pageset_db_filename)
+
+    try:
+        cursor_pageset = conn_pageset.cursor()
+        cursor_pageset.execute("SELECT COUNT(*) FROM Button")
+        if cursor_pageset.fetchone()[0] > 0:
+            print("Buttons already exist in the pageset database.")
+            conn_pageset.close()
+            return
+
+        # Attach the reference database
+        conn_pageset.execute(f"ATTACH DATABASE '{reference_db_filename}' AS ref_db")
+
+        # Copy entries from reference database
+        conn_pageset.execute("INSERT INTO Button SELECT * FROM ref_db.Button")
+        conn_pageset.execute("INSERT INTO ElementReference SELECT * FROM ref_db.ElementReference")
+        conn_pageset.execute("INSERT INTO ElementPlacement SELECT * FROM ref_db.ElementPlacement")
+        conn_pageset.execute("INSERT INTO CommandSequence SELECT * FROM ref_db.CommandSequence")
+
+        # Update page IDs for all layouts
+        cursor = conn_pageset.cursor()
+        cursor.execute("UPDATE ElementReference SET PageId = ?", (pageId,))
+
+        for layoutId, _, _ in layouts:
+            cursor.execute("UPDATE ElementPlacement SET PageLayoutId = ?", (layoutId,))
+
+        conn_pageset.commit()
+        conn_pageset.execute("DETACH DATABASE ref_db")
+
+    finally:
+        conn_pageset.close()
+
+
+def add_buttons_from_pptx(db_path, buttons_data):
+    """
+    Add buttons to TD Snap database from PowerPoint data.
+
+    Args:
+        db_path: Path to TD Snap database
+        buttons_data: List of tuples (label, message, slide_num)
+
+    Returns:
+        Number of buttons added
+    """
+    if not buttons_data:
+        return 0
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        # Get page and layout info
+        pageId, layouts = get_page_layout_details(db_path)
+
+        # Get starting IDs
+        buttonId = get_next_id(cursor, 'Button')
+        refId = get_next_id(cursor, 'ElementReference')
+
+        buttons_added = 0
+
+        for layoutId, ncols, nrows in layouts:
+            # Find available positions for this layout
+            available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
+
+            if len(available_positions) < len(buttons_data):
+                raise ValueError(f"Not enough grid space. Need {len(buttons_data)} positions, only {len(available_positions)} available.")
+
+            # Add buttons
+            for i, (label, message, slide_num) in enumerate(buttons_data):
+                current_buttonId = buttonId + i
+                current_refId = refId + i
+                position = available_positions[i]
+
+                # Get color for this slide
+                color = get_color_for_slide(slide_num)
+
+                # Add button (no symbol)
+                add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
+
+                # Add speak message command
+                add_command_speak_message(cursor, current_buttonId)
+
+                # Add element reference with slide color
+                add_element_reference(cursor, current_refId, pageId, color)
+
+                # Add button placement
+                add_button_placement(cursor, layoutId, current_refId, position)
+
+            buttons_added = len(buttons_data)
+
+            # Only process first layout (they should all be the same page)
+            break
+
+        conn.commit()
+        return buttons_added
+
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()

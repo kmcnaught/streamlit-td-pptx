@@ -1,0 +1,304 @@
+"""
+PowerPoint Speaker Notes to TD Snap Pageset Converter
+Main Streamlit application
+"""
+
+import streamlit as st
+import os
+from pptx_parser import extract_slides, split_notes, create_button_label, parse_pptx_to_buttons
+from td_utils_simple import (
+    create_temp_file,
+    add_home_button,
+    get_static_path,
+    update_timestamps,
+    update_page_title,
+    add_buttons_from_pptx
+)
+
+# Initialize session state
+if 'slides_data' not in st.session_state:
+    st.session_state.slides_data = None
+if 'split_levels' not in st.session_state:
+    st.session_state.split_levels = {}
+if 'default_split_level' not in st.session_state:
+    st.session_state.default_split_level = 2
+if 'max_label_length' not in st.session_state:
+    st.session_state.max_label_length = 30
+
+
+st.title('PowerPoint to TD Snap Pageset Converter')
+
+st.markdown("""
+This app converts PowerPoint speaker notes into a TD Snap communication pageset.
+Each slide's notes will be split into button cells based on your preferences.
+""")
+
+# Step 1: Upload PowerPoint file
+st.header("Step 1: Upload PowerPoint File")
+pptx_file = st.file_uploader("Choose a PowerPoint file", type=['pptx'])
+
+if pptx_file is not None:
+    # Extract slides when file is uploaded
+    if st.session_state.slides_data is None:
+        with st.spinner("Extracting slides and speaker notes..."):
+            st.session_state.slides_data = extract_slides(pptx_file)
+            pptx_file.seek(0)  # Reset file pointer
+
+    slides_data = st.session_state.slides_data
+
+    # Show summary
+    total_slides = len(slides_data)
+    slides_with_notes = sum(1 for s in slides_data if s['notes'])
+
+    st.success(f"Found {total_slides} slides, {slides_with_notes} with speaker notes")
+
+    # Step 2: Configure splitting
+    st.header("Step 2: Configure Content Splitting")
+
+    st.markdown("""
+    **Split levels:**
+    - **1**: Whole note (one button per slide)
+    - **2**: Paragraphs (double line breaks)
+    - **3**: Lines (single line breaks)
+    - **4**: Sentences (period + space)
+    """)
+
+    # Global split level buttons
+    st.subheader("Default split level for all slides")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        if st.button("1: Whole", use_container_width=True,
+                     type="primary" if st.session_state.default_split_level == 1 else "secondary"):
+            st.session_state.default_split_level = 1
+            st.rerun()
+
+    with col2:
+        if st.button("2: Paragraphs", use_container_width=True,
+                     type="primary" if st.session_state.default_split_level == 2 else "secondary"):
+            st.session_state.default_split_level = 2
+            st.rerun()
+
+    with col3:
+        if st.button("3: Lines", use_container_width=True,
+                     type="primary" if st.session_state.default_split_level == 3 else "secondary"):
+            st.session_state.default_split_level = 3
+            st.rerun()
+
+    with col4:
+        if st.button("4: Sentences", use_container_width=True,
+                     type="primary" if st.session_state.default_split_level == 4 else "secondary"):
+            st.session_state.default_split_level = 4
+            st.rerun()
+
+    default_level = st.session_state.default_split_level
+
+    # Maximum label length control
+    st.subheader("Maximum button label length")
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col1:
+        if st.button("➖ Shorter", key="label_shorter", use_container_width=True):
+            st.session_state.max_label_length = max(10, st.session_state.max_label_length - 5)
+            st.rerun()
+
+    with col2:
+        st.markdown(f"<center><h3>{st.session_state.max_label_length} characters</h3></center>",
+                   unsafe_allow_html=True)
+
+    with col3:
+        if st.button("➕ Longer", key="label_longer", use_container_width=True):
+            st.session_state.max_label_length = min(60, st.session_state.max_label_length + 5)
+            st.rerun()
+
+    max_label_length = st.session_state.max_label_length
+
+    # Preview with per-slide controls
+    st.subheader("Preview and Adjust")
+
+    # Only show slides with notes
+    slides_with_notes_list = [s for s in slides_data if s['notes']]
+
+    if not slides_with_notes_list:
+        st.warning("No slides with speaker notes found!")
+    else:
+        for slide in slides_with_notes_list:
+            slide_num = slide['slide_num']
+            title = slide['title']
+            notes = slide['notes']
+
+            # Use per-slide override or default
+            current_level = st.session_state.split_levels.get(slide_num, default_level)
+
+            # Split notes according to current level
+            chunks = split_notes(notes, current_level)
+
+            # Display slide preview
+            with st.expander(f"📊 Slide {slide_num}: {title} ({len(chunks)} buttons)", expanded=False):
+                # Per-slide controls
+                col1, col2, col3 = st.columns([1, 1, 3])
+
+                with col1:
+                    if st.button("Split More ➕", key=f"more_{slide_num}", use_container_width=True):
+                        new_level = min(4, current_level + 1)
+                        st.session_state.split_levels[slide_num] = new_level
+                        st.rerun()
+
+                with col2:
+                    if st.button("Split Less ➖", key=f"less_{slide_num}", use_container_width=True):
+                        new_level = max(1, current_level - 1)
+                        st.session_state.split_levels[slide_num] = new_level
+                        st.rerun()
+
+                with col3:
+                    st.caption(f"Current split level: {current_level}")
+
+                # Show preview of resulting buttons
+                st.markdown("**Resulting buttons:**")
+                for i, chunk in enumerate(chunks):
+                    label = create_button_label(title, i, len(chunks), max_length=max_label_length)
+                    preview_text = chunk[:100] + "..." if len(chunk) > 100 else chunk
+
+                    st.markdown(f"""
+                    **Cell {i+1}:** `{label}`
+                    > {preview_text}
+                    """)
+
+    # Step 3: Upload blank pageset and process
+    st.header("Step 3: Create TD Snap Pageset")
+
+    db_file = st.file_uploader("Choose a blank TD Snap pageset (.spb)", type=['spb'])
+
+    # Optional: Update pageset title
+    st.write("Pageset name (optional)")
+    update_title = st.checkbox('Update pageset title', value=True)
+
+    pageset_title = None
+    if update_title and pptx_file is not None:
+        file_name, _ = os.path.splitext(pptx_file.name)
+        pageset_title = st.text_input("Pageset name:", value=file_name)
+
+    # Process button
+    if db_file is not None and st.button("Create Pageset", type="primary"):
+        try:
+            # Create progress placeholder
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+
+            # Step 1: Parse PowerPoint
+            progress_text.text("📄 Parsing PowerPoint file...")
+            progress_bar.progress(10)
+            pptx_file.seek(0)
+
+            buttons_data = parse_pptx_to_buttons(
+                pptx_file,
+                split_levels=st.session_state.split_levels,
+                default_level=default_level
+            )
+
+            if not buttons_data:
+                progress_text.empty()
+                progress_bar.empty()
+                st.error("No buttons to create! Make sure slides have speaker notes.")
+            else:
+                progress_text.text(f"✓ Found {len(buttons_data)} buttons to create")
+                progress_bar.progress(20)
+
+                # Step 2: Create temp copy
+                progress_text.text("📋 Creating temporary pageset copy...")
+                progress_bar.progress(30)
+                temp_db_path = create_temp_file(db_file)
+
+                # Step 3: Add home button
+                progress_text.text("🏠 Adding home button...")
+                progress_bar.progress(40)
+                reference_db = get_static_path('home_button_ref.spb')
+                add_home_button(temp_db_path, reference_db)
+
+                # Step 4: Add buttons from PowerPoint
+                progress_text.text(f"➕ Adding {len(buttons_data)} buttons to pageset...")
+                progress_bar.progress(50)
+                num_added = add_buttons_from_pptx(temp_db_path, buttons_data)
+                progress_bar.progress(70)
+
+                # Step 5: Update title
+                if update_title and pageset_title:
+                    progress_text.text("📝 Updating pageset title...")
+                    progress_bar.progress(80)
+                    update_page_title(temp_db_path, pageset_title)
+
+                # Step 6: Update timestamps
+                progress_text.text("🕒 Updating timestamps...")
+                progress_bar.progress(90)
+                update_timestamps(temp_db_path)
+
+                # Step 7: Read for download
+                progress_text.text("💾 Preparing download...")
+                progress_bar.progress(95)
+                with open(temp_db_path, 'rb') as f:
+                    modified_db = f.read()
+
+                progress_bar.progress(100)
+                progress_text.text("✅ Complete!")
+
+                # Clean up progress indicators
+                import time
+                time.sleep(0.5)
+                progress_text.empty()
+                progress_bar.empty()
+
+                # Offer download
+                download_name = f"{pageset_title}.spb" if pageset_title else "modified_pageset.spb"
+
+                st.success(f"✅ Created pageset with {num_added} buttons!")
+
+                st.download_button(
+                    label="Download TD Snap Pageset",
+                    data=modified_db,
+                    file_name=download_name,
+                    mime="application/octet-stream"
+                )
+
+                # Clean up temp file
+                try:
+                    os.remove(temp_db_path)
+                except:
+                    pass
+
+        except Exception as e:
+            st.error(f"Error creating pageset: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+
+else:
+    st.info("👆 Upload a PowerPoint file to get started")
+
+# Sidebar with instructions
+with st.sidebar:
+    st.markdown("""
+    ## How to Use
+
+    1. **Upload PowerPoint**: Select a .pptx file with speaker notes
+    2. **Configure Splitting**: Choose split level and label length
+       - Use buttons to set default split level
+       - Use ➕/➖ to adjust label length
+       - Fine-tune individual slides with per-slide controls
+    3. **Upload Blank Pageset**: Select a blank TD Snap .spb file
+    4. **Create**: Click to generate your pageset
+
+    ## Features
+
+    - Preview all button content before creating
+    - Per-slide split control
+    - Adjustable button label length
+    - Automatic color coding by slide
+    - Real-time progress feedback
+    - Speaker notes become button messages
+
+    ## Split Levels
+
+    - **Level 1**: Whole note (one button per slide)
+    - **Level 2**: Paragraphs (recommended)
+    - **Level 3**: Lines
+    - **Level 4**: Sentences
+    """)

@@ -1,0 +1,10 @@
+[project]
+name = "streamlit-td-pptx"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.30.0",
+    "python-pptx>=0.6.21",
+]
