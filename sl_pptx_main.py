@@ -191,10 +191,21 @@ if pptx_file is not None:
     if not slides_with_notes_list:
         st.warning("No slides with speaker notes found!")
     else:
-        for slide in slides_with_notes_list:
+        # Initialize progress indicators for preview generation
+        total_slides = len(slides_with_notes_list)
+        preview_progress_bar = st.progress(0)
+        preview_progress_text = st.empty()
+        preview_progress_text.text(f"Loading previews: 0/{total_slides}")
+
+        for idx, slide in enumerate(slides_with_notes_list):
             slide_num = slide['slide_num']
             title = slide['title']
             notes = slide['notes']
+
+            # Update progress
+            progress = (idx + 1) / total_slides
+            preview_progress_bar.progress(progress)
+            preview_progress_text.text(f"Loading previews: {idx + 1}/{total_slides}")
 
             # Use per-slide override or default
             current_level = st.session_state.split_levels.get(slide_num, default_level)
@@ -241,10 +252,15 @@ if pptx_file is not None:
                     > {preview_text}
                     """)
 
+        # Clear progress indicators after all previews are loaded
+        preview_progress_bar.empty()
+        preview_progress_text.empty()
+
     # Step 3: Upload blank pageset and process
     st.header("Step 3: Create TD Snap Pageset")
 
     db_file = st.file_uploader("Choose a blank TD Snap pageset (.spb)", type=['spb'])
+    st.info("👆 Upload a blank TD Snap file to add buttons")
 
     # Create a log expander for processing visibility
     log_expander = st.expander("Show Processing Logs", expanded=False)
