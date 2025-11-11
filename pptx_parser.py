@@ -89,33 +89,81 @@ def split_notes(notes: str, level: int) -> List[str]:
         return [notes]
 
 
-def create_button_label(title: str, chunk_index: int, total_chunks: int, max_length: int = 30) -> str:
+def create_button_label(title: str, chunk_index: int, total_chunks: int,
+                        slide_num: int, content: str,
+                        format_type: str = "num_part_content", max_length: int = 30) -> str:
     """
-    Create button label from slide title.
+    Create button label with various format options.
 
     Args:
         title: Slide title
         chunk_index: Current chunk number (0-based)
         total_chunks: Total number of chunks for this slide
+        slide_num: Slide number (1-based)
+        content: The actual message content/chunk text
+        format_type: Label format type:
+            - "title_part": "Title (Part N)" [default]
+            - "slide_content": "Slide N: Content..."
+            - "content_only": "Content..."
+            - "num_title": "N - Title"
+            - "num_part_content": "N.P: Content..."
         max_length: Maximum label length before adding ellipsis
 
     Returns:
-        Label like "Slide Title... (1)" or "Introduction (2)"
+        Formatted button label
     """
-    # Truncate title if too long
-    if len(title) > max_length:
-        title = title[:max_length-3] + "..."
+    if format_type == "title_part":
+        # "Title (Part N)" format
+        truncated_title = title[:max_length-3] + "..." if len(title) > max_length else title
+        if total_chunks > 1:
+            label = f"{truncated_title} ({chunk_index + 1})"
+        else:
+            label = truncated_title
 
-    # Add chunk number if multiple chunks
-    if total_chunks > 1:
-        label = f"{title} ({chunk_index + 1})"
+    elif format_type == "slide_content":
+        # "Slide N: Content..." format
+        content_preview = content[:max_length-10] + "..." if len(content) > max_length-10 else content
+        # Replace newlines with spaces for cleaner preview
+        content_preview = content_preview.replace('\n', ' ').strip()
+        label = f"Slide {slide_num}: {content_preview}"
+
+    elif format_type == "content_only":
+        # "Content..." format
+        content_preview = content[:max_length] + "..." if len(content) > max_length else content
+        # Replace newlines with spaces for cleaner preview
+        label = content_preview.replace('\n', ' ').strip()
+
+    elif format_type == "num_title":
+        # "N - Title" format
+        truncated_title = title[:max_length-5] + "..." if len(title) > max_length-5 else title
+        label = f"{slide_num} - {truncated_title}"
+
+    elif format_type == "num_part_content":
+        # "N.P: Content..." format
+        if total_chunks > 1:
+            part_prefix = f"{slide_num}.{chunk_index + 1}: "
+        else:
+            part_prefix = f"{slide_num}: "
+
+        remaining_length = max_length - len(part_prefix)
+        content_preview = content[:remaining_length] + "..." if len(content) > remaining_length else content
+        # Replace newlines with spaces for cleaner preview
+        content_preview = content_preview.replace('\n', ' ').strip()
+        label = f"{part_prefix}{content_preview}"
+
     else:
-        label = title
+        # Default to title_part format
+        truncated_title = title[:max_length-3] + "..." if len(title) > max_length else title
+        if total_chunks > 1:
+            label = f"{truncated_title} ({chunk_index + 1})"
+        else:
+            label = truncated_title
 
     return label
 
 
-def parse_pptx_to_buttons(pptx_file, split_levels: dict = None, default_level: int = 2) -> List[Tuple[str, str, int]]:
+def parse_pptx_to_buttons(pptx_file, split_levels: dict = None, default_level: int = 2,
+                          label_format: str = "title_part", max_label_length: int = 30) -> List[Tuple[str, str, int]]:
     """
     Parse PowerPoint file into button data.
 
@@ -123,6 +171,8 @@ def parse_pptx_to_buttons(pptx_file, split_levels: dict = None, default_level: i
         pptx_file: PowerPoint file object
         split_levels: Dict mapping slide_num to split level (overrides default)
         default_level: Default split level for all slides
+        label_format: Label format type (title_part, slide_content, content_only, num_title, num_part_content)
+        max_label_length: Maximum label length before truncation
 
     Returns:
         List of tuples: (label, message, slide_num)
@@ -147,7 +197,15 @@ def parse_pptx_to_buttons(pptx_file, split_levels: dict = None, default_level: i
 
         # Create buttons
         for i, chunk in enumerate(chunks):
-            label = create_button_label(title, i, len(chunks))
+            label = create_button_label(
+                title=title,
+                chunk_index=i,
+                total_chunks=len(chunks),
+                slide_num=slide_num,
+                content=chunk,
+                format_type=label_format,
+                max_length=max_label_length
+            )
             buttons.append((label, chunk, slide_num))
 
     return buttons

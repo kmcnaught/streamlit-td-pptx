@@ -385,38 +385,29 @@ def add_buttons_from_pptx(db_path, buttons_data):
             if len(available_positions) < len(buttons_data):
                 raise ValueError(f"Not enough grid space. Need {len(buttons_data)} positions, only {len(available_positions)} available.")
 
-            # DEBUG: Skip adding ALL buttons - just test the database loading/saving flow
-            buttons_added = 0
+            # Add buttons
+            for i, (label, message, slide_num) in enumerate(buttons_data):
+                print(f"Adding button: {label} (Slide {slide_num})")
+                current_buttonId = buttonId + i
+                current_refId = refId + i
+                position = available_positions[i]
 
-            # # Add buttons
-            # for i, (label, message, slide_num) in enumerate(buttons_data):
-            #     current_buttonId = buttonId + i
-            #     current_refId = refId + i
-            #     position = available_positions[i]
+                # Get color for this slide
+                color = get_color_for_slide(slide_num)
 
-            #     # Get color for this slide
-            #     color = get_color_for_slide(slide_num)
+                # Add button (no symbol)
+                add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
 
-            #     # Add button (no symbol)
-            #     add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
+                # Add speak message command
+                add_command_speak_message(cursor, current_buttonId)
 
-            #     # Add speak message command
-            #     add_command_speak_message(cursor, current_buttonId)
+                # Add element reference with slide color
+                add_element_reference(cursor, current_refId, pageId, color)
 
-            #     # Add element reference with slide color
-            #     add_element_reference(cursor, current_refId, pageId, color)
+                # Add button placement
+                add_button_placement(cursor, layoutId, current_refId, position)
 
-            #     # Add button placement
-            #     add_button_placement(cursor, layoutId, current_refId, position)
-
-            #     # DEBUG: Early exit after 1 button to test TD Snap import
-            #     buttons_added = i + 1
-            #     break
-
-            # buttons_added = len(buttons_data)  # Original line - commented out
-
-            # Only process first layout (they should all be the same page)
-            break
+                buttons_added += 1
 
         conn.commit()
         return buttons_added

@@ -27,6 +27,8 @@ if 'default_split_level' not in st.session_state:
     st.session_state.default_split_level = 2
 if 'max_label_length' not in st.session_state:
     st.session_state.max_label_length = 30
+if 'label_format' not in st.session_state:
+    st.session_state.label_format = "title_part"
 
 
 st.title('PowerPoint to TD Snap Pageset Converter')
@@ -133,6 +135,53 @@ if pptx_file is not None:
 
     max_label_length = st.session_state.max_label_length
 
+    # Label format selector
+    st.subheader("Button label format")
+
+    # Format options with descriptions
+    format_options = {
+        "title_part": ("Title (Part N)", "Introduction (2)"),
+        "slide_content": ("Slide N: Content", "Slide 3: Welcome to our..."),
+        "content_only": ("Content Only", "Welcome to our program..."),
+        "num_title": ("N - Title", "3 - Introduction"),
+        "num_part_content": ("N.P: Content", "3.2: Welcome to our...")
+    }
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    for idx, (col, (format_key, (format_name, format_example))) in enumerate(zip(
+        [col1, col2, col3, col4, col5],
+        format_options.items()
+    )):
+        with col:
+            is_selected = st.session_state.label_format == format_key
+            if st.button(
+                format_name,
+                key=f"format_{format_key}",
+                use_container_width=True,
+                type="primary" if is_selected else "secondary"
+            ):
+                st.session_state.label_format = format_key
+                st.rerun()
+
+    # Show example with the first slide's first button (if available)
+    if st.session_state.slides_with_notes_list:
+        first_slide = st.session_state.slides_with_notes_list[0]
+        first_chunks = split_notes(first_slide['notes'], default_level)
+        if first_chunks:
+            example_label = create_button_label(
+                title=first_slide['title'],
+                chunk_index=0,
+                total_chunks=len(first_chunks),
+                slide_num=first_slide['slide_num'],
+                content=first_chunks[0],
+                format_type=st.session_state.label_format,
+                max_length=max_label_length
+            )
+            st.info(f"**Example:** `{example_label}`")
+
+    label_format = st.session_state.label_format
+
     # Preview with per-slide controls
     st.subheader("Preview and Adjust")
 
@@ -176,7 +225,15 @@ if pptx_file is not None:
                 # Show preview of resulting buttons
                 st.markdown("**Resulting buttons:**")
                 for i, chunk in enumerate(chunks):
-                    label = create_button_label(title, i, len(chunks), max_length=max_label_length)
+                    label = create_button_label(
+                        title=title,
+                        chunk_index=i,
+                        total_chunks=len(chunks),
+                        slide_num=slide_num,
+                        content=chunk,
+                        format_type=label_format,
+                        max_length=max_label_length
+                    )
                     preview_text = chunk[:100] + "..." if len(chunk) > 100 else chunk
 
                     st.markdown(f"""
@@ -247,7 +304,9 @@ if pptx_file is not None:
             buttons_data = parse_pptx_to_buttons(
                 pptx_file,
                 split_levels=st.session_state.split_levels,
-                default_level=default_level
+                default_level=default_level,
+                label_format=label_format,
+                max_label_length=max_label_length
             )
 
             if not buttons_data:
