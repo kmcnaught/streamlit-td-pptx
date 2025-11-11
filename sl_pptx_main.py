@@ -12,12 +12,15 @@ from td_utils_simple import (
     get_static_path,
     update_timestamps,
     update_page_title,
-    add_buttons_from_pptx
+    add_buttons_from_pptx,
+    check_existing_buttons
 )
 
 # Initialize session state
 if 'slides_data' not in st.session_state:
     st.session_state.slides_data = None
+if 'slides_with_notes_list' not in st.session_state:
+    st.session_state.slides_with_notes_list = None
 if 'split_levels' not in st.session_state:
     st.session_state.split_levels = {}
 if 'default_split_level' not in st.session_state:
@@ -40,20 +43,37 @@ pptx_file = st.file_uploader("Choose a PowerPoint file", type=['pptx'])
 if pptx_file is not None:
     # Extract slides when file is uploaded
     if st.session_state.slides_data is None:
-        with st.spinner("Extracting slides and speaker notes..."):
-            st.session_state.slides_data = extract_slides(pptx_file)
-            pptx_file.seek(0)  # Reset file pointer
+        # Create progress tracking elements
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+
+        progress_text.text("📄 Extracting slides and speaker notes...")
+        progress_bar.progress(50)
+
+        st.session_state.slides_data = extract_slides(pptx_file)
+        pptx_file.seek(0)  # Reset file pointer
+
+        progress_text.text("✅ Extraction complete!")
+        progress_bar.progress(100)
+
+        # Clean up progress indicators immediately
+        progress_text.empty()
+        progress_bar.empty()
+
+        # Cache the filtered slides list for performance
+        slides_data = st.session_state.slides_data
+        st.session_state.slides_with_notes_list = [s for s in slides_data if s['notes']]
+
+    # Step 2: Configure splitting - show this ASAP
+    st.header("Step 2: Configure Content Splitting")
 
     slides_data = st.session_state.slides_data
 
-    # Show summary
+    # Show summary (calculate only once)
     total_slides = len(slides_data)
-    slides_with_notes = sum(1 for s in slides_data if s['notes'])
+    slides_with_notes = len(st.session_state.slides_with_notes_list)
 
     st.success(f"Found {total_slides} slides, {slides_with_notes} with speaker notes")
-
-    # Step 2: Configure splitting
-    st.header("Step 2: Configure Content Splitting")
 
     st.markdown("""
     **Split levels:**
@@ -116,8 +136,8 @@ if pptx_file is not None:
     # Preview with per-slide controls
     st.subheader("Preview and Adjust")
 
-    # Only show slides with notes
-    slides_with_notes_list = [s for s in slides_data if s['notes']]
+    # Use cached filtered slides list
+    slides_with_notes_list = st.session_state.slides_with_notes_list
 
     if not slides_with_notes_list:
         st.warning("No slides with speaker notes found!")
@@ -169,6 +189,9 @@ if pptx_file is not None:
 
     db_file = st.file_uploader("Choose a blank TD Snap pageset (.spb)", type=['spb'])
 
+    # Create a log expander for processing visibility
+    log_expander = st.expander("Show Processing Logs", expanded=False)
+
     # Optional: Update pageset title
     st.write("Pageset name (optional)")
     update_title = st.checkbox('Update pageset title', value=True)
@@ -178,8 +201,39 @@ if pptx_file is not None:
         file_name, _ = os.path.splitext(pptx_file.name)
         pageset_title = st.text_input("Pageset name:", value=file_name)
 
-    # Process button
-    if db_file is not None and st.button("Create Pageset", type="primary"):
+    # Check for existing buttons and show warning if needed
+    proceed_with_existing = True
+    button_count = 0
+    button_samples = []
+
+    if db_file is not None:
+        # Create temp file to check for existing buttons
+        temp_check_path = create_temp_file(db_file)
+        button_count, button_samples = check_existing_buttons(temp_check_path)
+
+        # Clean up temp file
+        try:
+            os.remove(temp_check_path)
+        except:
+            pass
+
+        if button_count > 0:
+            st.warning(f"⚠️ Found {button_count} existing button(s) in this pageset")
+
+            if button_samples:
+                st.write("**Example buttons:**")
+                for i, label in enumerate(button_samples, 1):
+                    st.write(f"{i}. {label}")
+
+            proceed_with_existing = st.checkbox(
+                "I understand this will add buttons to existing content, using only empty cells",
+                value=False
+            )
+
+    # Process button (only enabled if no existing buttons or user confirmed)
+    button_disabled = button_count > 0 and not proceed_with_existing
+
+    if db_file is not None and not button_disabled and st.button("Create Pageset", type="primary"):
         try:
             # Create progress placeholder
             progress_text = st.empty()
@@ -204,10 +258,21 @@ if pptx_file is not None:
                 progress_text.text(f"✓ Found {len(buttons_data)} buttons to create")
                 progress_bar.progress(20)
 
+                log_expander.write(f"📊 Parsed {len(buttons_data)} buttons from PowerPoint")
+
                 # Step 2: Create temp copy
                 progress_text.text("📋 Creating temporary pageset copy...")
                 progress_bar.progress(30)
                 temp_db_path = create_temp_file(db_file)
+
+                # Check existing buttons in temp file
+                existing_count, existing_samples = check_existing_buttons(temp_db_path)
+                if existing_count > 0:
+                    log_expander.write(f"📋 Found {existing_count} existing buttons in pageset")
+                    if existing_samples:
+                        log_expander.write(f"   Examples: {', '.join(existing_samples[:3])}")
+                else:
+                    log_expander.write("📋 Pageset is empty - starting fresh")
 
                 # Step 3: Add home button
                 progress_text.text("🏠 Adding home button...")
@@ -215,11 +280,16 @@ if pptx_file is not None:
                 reference_db = get_static_path('home_button_ref.spb')
                 add_home_button(temp_db_path, reference_db)
 
+                if existing_count == 0:
+                    log_expander.write("🏠 Added home button")
+
                 # Step 4: Add buttons from PowerPoint
                 progress_text.text(f"➕ Adding {len(buttons_data)} buttons to pageset...")
                 progress_bar.progress(50)
+                log_expander.write(f"➕ Adding {len(buttons_data)} buttons to available positions...")
                 num_added = add_buttons_from_pptx(temp_db_path, buttons_data)
                 progress_bar.progress(70)
+                log_expander.write(f"✅ Successfully added {num_added} buttons")
 
                 # Step 5: Update title
                 if update_title and pageset_title:

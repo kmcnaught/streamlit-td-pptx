@@ -130,6 +130,10 @@ def add_button(cursor, buttonId, refId, label, message, symbol=None):
     label_ownership = 0 if label is None else 3
     image_ownership = 0 if symbol is None else 3
 
+    # TEMP FIX: Strip newlines from message - TD Snap may not support multi-line messages
+    if message:
+        message = message.replace('\n', ' ').replace('\r', ' ')
+
     new_uuid = str(uuid.uuid1())
     cursor.execute("""
         INSERT INTO Button (Id, Label, Message, ImageOwnership, BorderColor, BorderThickness, LabelOwnership, CommandFlags, ContentType, UniqueId, ElementReferenceId, ActiveContentType, LibrarySymbolId, PageSetImageId, SymbolColorDataId, MessageRecordingId)
@@ -247,8 +251,39 @@ def update_page_title(db_path, new_name, page_set_id=1):
         conn.close()
 
 
+def check_existing_buttons(db_filename):
+    """
+    Check if buttons already exist in database.
+
+    Returns:
+        tuple: (button_count, button_samples)
+            button_count: int - number of existing buttons
+            button_samples: list - first 3 button labels
+    """
+    conn = sqlite3.connect(db_filename)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT COUNT(*) FROM Button")
+        button_count = cursor.fetchone()[0]
+
+        button_samples = []
+        if button_count > 0:
+            cursor.execute("SELECT Label FROM Button LIMIT 3")
+            button_samples = [row[0] for row in cursor.fetchall() if row[0]]
+
+        return button_count, button_samples
+    finally:
+        conn.close()
+
+
 def add_home_button(pageset_db_filename, reference_db_filename):
-    """Copy home button from reference database to pageset."""
+    """
+    Copy home button from reference database to pageset.
+
+    Note: Only adds home button if no buttons exist yet.
+    Use add_buttons_from_pptx() to add content buttons - it handles existing buttons properly.
+    """
     pageId, layouts = get_page_layout_details(pageset_db_filename)
 
     conn_pageset = sqlite3.connect(pageset_db_filename)
@@ -257,7 +292,8 @@ def add_home_button(pageset_db_filename, reference_db_filename):
         cursor_pageset = conn_pageset.cursor()
         cursor_pageset.execute("SELECT COUNT(*) FROM Button")
         if cursor_pageset.fetchone()[0] > 0:
-            print("Buttons already exist in the pageset database.")
+            # Buttons already exist, skip adding home button
+            # (it may already be there or user wants to preserve existing layout)
             conn_pageset.close()
             return
 
@@ -270,12 +306,43 @@ def add_home_button(pageset_db_filename, reference_db_filename):
         conn_pageset.execute("INSERT INTO ElementPlacement SELECT * FROM ref_db.ElementPlacement")
         conn_pageset.execute("INSERT INTO CommandSequence SELECT * FROM ref_db.CommandSequence")
 
-        # Update page IDs for all layouts
+        # Update page IDs - need to properly duplicate ElementPlacement for each layout
         cursor = conn_pageset.cursor()
+
+        # Update ElementReference with correct PageId
         cursor.execute("UPDATE ElementReference SET PageId = ?", (pageId,))
 
-        for layoutId, _, _ in layouts:
-            cursor.execute("UPDATE ElementPlacement SET PageLayoutId = ?", (layoutId,))
+        # For ElementPlacement, we need to duplicate the home button row for each layout
+        # Get the home button's ElementReferenceId
+        cursor.execute("SELECT ElementReferenceId FROM Button WHERE Label = 'Home'")
+        home_ref_id = cursor.fetchone()
+        if home_ref_id:
+            home_ref_id = home_ref_id[0]
+
+            # Get the existing ElementPlacement row for the home button
+            cursor.execute("SELECT * FROM ElementPlacement WHERE ElementReferenceId = ?", (home_ref_id,))
+            existing_row = cursor.fetchone()
+
+            if existing_row:
+                # Get column info
+                cursor.execute("PRAGMA table_info(ElementPlacement)")
+                columns = cursor.fetchall()
+                column_names = [col[1] for col in columns]
+
+                # Get the ID of the existing row so we can delete it later
+                existing_row_id = existing_row[column_names.index('Id')]
+
+                # Duplicate the row for each layout
+                for layoutId, _, _ in layouts:
+                    new_row = list(existing_row)
+                    new_row[column_names.index('PageLayoutId')] = layoutId
+                    new_row[column_names.index('Id')] = None  # Let SQLite auto-generate
+
+                    placeholders = ', '.join(['?' for _ in column_names])
+                    cursor.execute(f"INSERT INTO ElementPlacement ({', '.join(column_names)}) VALUES ({placeholders})", new_row)
+
+                # Delete the original row
+                cursor.execute("DELETE FROM ElementPlacement WHERE Id = ?", (existing_row_id,))
 
         conn_pageset.commit()
         conn_pageset.execute("DETACH DATABASE ref_db")
@@ -318,28 +385,35 @@ def add_buttons_from_pptx(db_path, buttons_data):
             if len(available_positions) < len(buttons_data):
                 raise ValueError(f"Not enough grid space. Need {len(buttons_data)} positions, only {len(available_positions)} available.")
 
-            # Add buttons
-            for i, (label, message, slide_num) in enumerate(buttons_data):
-                current_buttonId = buttonId + i
-                current_refId = refId + i
-                position = available_positions[i]
+            # DEBUG: Skip adding ALL buttons - just test the database loading/saving flow
+            buttons_added = 0
 
-                # Get color for this slide
-                color = get_color_for_slide(slide_num)
+            # # Add buttons
+            # for i, (label, message, slide_num) in enumerate(buttons_data):
+            #     current_buttonId = buttonId + i
+            #     current_refId = refId + i
+            #     position = available_positions[i]
 
-                # Add button (no symbol)
-                add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
+            #     # Get color for this slide
+            #     color = get_color_for_slide(slide_num)
 
-                # Add speak message command
-                add_command_speak_message(cursor, current_buttonId)
+            #     # Add button (no symbol)
+            #     add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
 
-                # Add element reference with slide color
-                add_element_reference(cursor, current_refId, pageId, color)
+            #     # Add speak message command
+            #     add_command_speak_message(cursor, current_buttonId)
 
-                # Add button placement
-                add_button_placement(cursor, layoutId, current_refId, position)
+            #     # Add element reference with slide color
+            #     add_element_reference(cursor, current_refId, pageId, color)
 
-            buttons_added = len(buttons_data)
+            #     # Add button placement
+            #     add_button_placement(cursor, layoutId, current_refId, position)
+
+            #     # DEBUG: Early exit after 1 button to test TD Snap import
+            #     buttons_added = i + 1
+            #     break
+
+            # buttons_added = len(buttons_data)  # Original line - commented out
 
             # Only process first layout (they should all be the same page)
             break
