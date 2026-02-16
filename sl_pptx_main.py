@@ -29,6 +29,29 @@ if 'max_label_length' not in st.session_state:
     st.session_state.max_label_length = 30
 if 'label_format' not in st.session_state:
     st.session_state.label_format = "title_part"
+if 'uploaded_spb_file' not in st.session_state:
+    st.session_state.uploaded_spb_file = None
+if 'expanded_slides' not in st.session_state:
+    st.session_state.expanded_slides = set()
+if 'proceed_with_existing' not in st.session_state:
+    st.session_state.proceed_with_existing = False
+if 'spb_file_name' not in st.session_state:
+    st.session_state.spb_file_name = None
+if 'cached_button_count' not in st.session_state:
+    st.session_state.cached_button_count = 0
+if 'cached_button_samples' not in st.session_state:
+    st.session_state.cached_button_samples = []
+
+
+def get_split_level_name(level: int) -> str:
+    """Convert numeric split level to descriptive name."""
+    level_names = {
+        1: "whole page",
+        2: "paragraphs",
+        3: "lines",
+        4: "sentences"
+    }
+    return level_names.get(level, f"level {level}")
 
 
 st.title('PowerPoint to TD Snap Pageset Converter')
@@ -214,7 +237,8 @@ if pptx_file is not None:
             chunks = split_notes(notes, current_level)
 
             # Display slide preview
-            with st.expander(f"📊 Slide {slide_num}: {title} ({len(chunks)} buttons)", expanded=False):
+            with st.expander(f"📊 Slide {slide_num}: {title} ({len(chunks)} buttons)",
+                           expanded=(slide_num in st.session_state.expanded_slides)):
                 # Per-slide controls
                 col1, col2, col3 = st.columns([1, 1, 3])
 
@@ -222,16 +246,18 @@ if pptx_file is not None:
                     if st.button("Split More ➕", key=f"more_{slide_num}", use_container_width=True):
                         new_level = min(4, current_level + 1)
                         st.session_state.split_levels[slide_num] = new_level
+                        st.session_state.expanded_slides.add(slide_num)
                         st.rerun()
 
                 with col2:
                     if st.button("Split Less ➖", key=f"less_{slide_num}", use_container_width=True):
                         new_level = max(1, current_level - 1)
                         st.session_state.split_levels[slide_num] = new_level
+                        st.session_state.expanded_slides.add(slide_num)
                         st.rerun()
 
                 with col3:
-                    st.caption(f"Current split level: {current_level}")
+                    st.caption(f"Current split level: {get_split_level_name(current_level)}")
 
                 # Show preview of resulting buttons
                 st.markdown("**Resulting buttons:**")
@@ -259,7 +285,19 @@ if pptx_file is not None:
     # Step 3: Upload blank pageset and process
     st.header("Step 3: Create TD Snap Pageset")
 
-    db_file = st.file_uploader("Choose a blank TD Snap pageset (.spb)", type=['spb'])
+    st.file_uploader("Choose a blank TD Snap pageset (.spb)", type=['spb'], key='spb_uploader')
+
+    # Use the session state version which persists across reruns
+    uploaded_file = st.session_state.spb_uploader
+
+    if uploaded_file is not None:
+        # Only reset checkbox if this is a different file
+        if (st.session_state.uploaded_spb_file is None or
+            uploaded_file.name != st.session_state.uploaded_spb_file.name):
+            st.session_state.proceed_with_existing = False
+        st.session_state.uploaded_spb_file = uploaded_file
+
+    db_file = st.session_state.uploaded_spb_file
     st.info("👆 Upload a blank TD Snap file to add buttons")
 
     # Create a log expander for processing visibility
@@ -280,31 +318,55 @@ if pptx_file is not None:
     button_samples = []
 
     if db_file is not None:
-        # Create temp file to check for existing buttons
-        temp_check_path = create_temp_file(db_file)
-        button_count, button_samples = check_existing_buttons(temp_check_path)
+        # Only check buttons if this is a new/different file
+        current_file_name = db_file.name if hasattr(db_file, 'name') else str(db_file)
+        if st.session_state.spb_file_name != current_file_name:
+            # Create temp file to check for existing buttons
+            temp_check_path = create_temp_file(db_file)
+            button_count, button_samples = check_existing_buttons(temp_check_path)
 
-        # Clean up temp file
-        try:
-            os.remove(temp_check_path)
-        except:
-            pass
+            # Cache the results
+            st.session_state.spb_file_name = current_file_name
+            st.session_state.cached_button_count = button_count
+            st.session_state.cached_button_samples = button_samples
+
+            # Clean up temp file
+            try:
+                os.remove(temp_check_path)
+            except:
+                pass
+        else:
+            # Use cached values
+            button_count = st.session_state.cached_button_count
+            button_samples = st.session_state.cached_button_samples
 
         if button_count > 0:
-            st.warning(f"⚠️ Found {button_count} existing button(s) in this pageset")
+            # Format: "X buttons found:"
+            st.warning(f"⚠️ {button_count} button{'s' if button_count != 1 else ''} found:")
 
-            if button_samples:
-                st.write("**Example buttons:**")
-                for i, label in enumerate(button_samples, 1):
-                    st.write(f"{i}. {label}")
+            # Show all if <= 3, otherwise show first 3 with "more" indicator
+            st.write("**Existing buttons:**")
+            if button_count <= 3:
+                for label in button_samples:
+                    st.write(f"- {label}")
+            else:
+                for label in button_samples[:3]:
+                    st.write(f"- {label}")
+                remaining = button_count - 3
+                st.write(f"... + {remaining} more button{'s' if remaining != 1 else ''}")
 
-            proceed_with_existing = st.checkbox(
+            st.write("")  # Add spacing
+
+            # Update session state from checkbox (no key to avoid conflicts)
+            checkbox_value = st.checkbox(
                 "I understand this will add buttons to existing content, using only empty cells",
-                value=False
+                value=st.session_state.proceed_with_existing
             )
+            st.session_state.proceed_with_existing = checkbox_value
+            proceed_with_existing = checkbox_value
 
     # Process button (only enabled if no existing buttons or user confirmed)
-    button_disabled = button_count > 0 and not proceed_with_existing
+    button_disabled = button_count > 0 and not st.session_state.proceed_with_existing
 
     if db_file is not None and not button_disabled and st.button("Create Pageset", type="primary"):
         try:
