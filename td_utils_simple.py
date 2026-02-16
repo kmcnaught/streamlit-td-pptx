@@ -277,6 +277,77 @@ def check_existing_buttons(db_filename):
         conn.close()
 
 
+def get_grid_capacity(db_path):
+    """
+    Calculate grid capacity information for the pageset.
+
+    Args:
+        db_path: Path to TD Snap database
+
+    Returns:
+        dict: Grid capacity information
+            - ncols: Number of columns
+            - nrows: Number of rows
+            - total_pages: Total number of pages (hardcoded to 10)
+            - reserved_cells: Number of cells reserved for navigation (19)
+            - occupied_cells: Number of cells already occupied by buttons (max across all layouts)
+            - available_cells: Number of cells available for new buttons (minimum across all layouts)
+            - cells_per_page: Grid cells per page (ncols × nrows)
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        # Get page and layout info
+        pageId, layouts = get_page_layout_details(db_path)
+
+        # Use first layout to get grid dimensions (assume all layouts have same dimensions)
+        first_layout = layouts[0]
+        layoutId, ncols, nrows = first_layout
+
+        # Constants
+        total_pages = 10  # Hardcoded in find_available_positions
+        reserved_cells = 19  # 10 bottom-right (home) + 9 top-right (navigation on pages 2-10)
+
+        # Check ALL layouts and find the minimum available cells
+        # (different layouts may have different numbers of occupied cells)
+        min_available = float('inf')
+        max_occupied = 0
+
+        for layoutId, layout_ncols, layout_nrows in layouts:
+            available_positions = find_available_positions(db_path, layoutId, layout_ncols, layout_nrows)
+            num_available = len(available_positions)
+
+            # Count occupied for this layout
+            cursor.execute(
+                "SELECT COUNT(*) FROM ElementPlacement WHERE PageLayoutId = ?",
+                (layoutId,)
+            )
+            occupied = cursor.fetchone()[0]
+
+            if num_available < min_available:
+                min_available = num_available
+
+            if occupied > max_occupied:
+                max_occupied = occupied
+
+        # Calculate cells per page
+        cells_per_page = ncols * nrows
+
+        return {
+            'ncols': ncols,
+            'nrows': nrows,
+            'total_pages': total_pages,
+            'reserved_cells': reserved_cells,
+            'occupied_cells': max_occupied,
+            'available_cells': min_available,
+            'cells_per_page': cells_per_page
+        }
+
+    finally:
+        conn.close()
+
+
 def add_home_button(pageset_db_filename, reference_db_filename):
     """
     Copy home button from reference database to pageset.
@@ -372,13 +443,28 @@ def add_buttons_from_pptx(db_path, buttons_data):
         # Get page and layout info
         pageId, layouts = get_page_layout_details(db_path)
 
-        # Validate space availability for first layout (assume same for all)
-        first_layout = layouts[0]
-        layoutId, ncols, nrows = first_layout
-        available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
+        # Validate space availability for ALL layouts (must check each one)
+        min_available = float('inf')
+        limiting_layout = None
 
-        if len(available_positions) < len(buttons_data):
-            raise ValueError(f"Not enough grid space. Need {len(buttons_data)} positions, only {len(available_positions)} available.")
+        for layoutId, ncols, nrows in layouts:
+            available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
+            if len(available_positions) < min_available:
+                min_available = len(available_positions)
+                limiting_layout = (layoutId, ncols, nrows)
+
+        if min_available < len(buttons_data):
+            shortage = len(buttons_data) - min_available
+            raise ValueError(
+                f"Not enough grid space!\n\n"
+                f"Required: {len(buttons_data)} cells\n"
+                f"Available: {min_available} cells (limited by layout {limiting_layout[0]})\n"
+                f"Shortage: {shortage} cells\n\n"
+                f"Solutions:\n"
+                f"- Reduce split level (use fewer buttons per slide)\n"
+                f"- Remove some slides from your PowerPoint\n"
+                f"- Use a blank pageset with a larger grid"
+            )
 
         # Get starting IDs
         buttonId = get_next_id(cursor, 'Button')

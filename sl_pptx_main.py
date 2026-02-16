@@ -13,7 +13,8 @@ from td_utils_simple import (
     update_timestamps,
     update_page_title,
     add_buttons_from_pptx,
-    check_existing_buttons
+    check_existing_buttons,
+    get_grid_capacity
 )
 
 # Initialize session state
@@ -41,6 +42,10 @@ if 'cached_button_count' not in st.session_state:
     st.session_state.cached_button_count = 0
 if 'cached_button_samples' not in st.session_state:
     st.session_state.cached_button_samples = []
+if 'grid_capacity_info' not in st.session_state:
+    st.session_state.grid_capacity_info = None
+if 'total_button_count' not in st.session_state:
+    st.session_state.total_button_count = 0
 
 
 def get_split_level_name(level: int) -> str:
@@ -220,6 +225,9 @@ if pptx_file is not None:
         preview_progress_text = st.empty()
         preview_progress_text.text(f"Loading previews: 0/{total_slides}")
 
+        # Track total button count
+        total_button_count = 0
+
         for idx, slide in enumerate(slides_with_notes_list):
             slide_num = slide['slide_num']
             title = slide['title']
@@ -235,6 +243,9 @@ if pptx_file is not None:
 
             # Split notes according to current level
             chunks = split_notes(notes, current_level)
+
+            # Count buttons
+            total_button_count += len(chunks)
 
             # Display slide preview
             with st.expander(f"📊 Slide {slide_num}: {title} ({len(chunks)} buttons)",
@@ -282,6 +293,41 @@ if pptx_file is not None:
         preview_progress_bar.empty()
         preview_progress_text.empty()
 
+        # Store total button count in session state
+        st.session_state.total_button_count = total_button_count
+
+        # Display total button count with capacity indicator
+        st.markdown("---")
+        st.subheader(f"📊 Total: {total_button_count} buttons")
+
+        # Show capacity check if .spb file is uploaded
+        if st.session_state.grid_capacity_info is not None:
+            capacity = st.session_state.grid_capacity_info
+            available = capacity['available_cells']
+            usage_percent = (total_button_count / available * 100) if available > 0 else 100
+
+            if total_button_count <= available:
+                if usage_percent < 80:
+                    st.success(
+                        f"✅ **Capacity OK**: Using {total_button_count} of {available} available cells "
+                        f"({usage_percent:.0f}%)"
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ **Getting close to capacity**: Using {total_button_count} of {available} available cells "
+                        f"({usage_percent:.0f}%)"
+                    )
+            else:
+                shortage = total_button_count - available
+                st.error(
+                    f"❌ **Over capacity!** Need {total_button_count} cells, only {available} available. "
+                    f"Shortage: {shortage} cells\n\n"
+                    f"**Solutions:**\n"
+                    f"- Reduce split level (use fewer buttons per slide)\n"
+                    f"- Remove some slides from your PowerPoint\n"
+                    f"- Use a blank pageset with a larger grid"
+                )
+
     # Step 3: Upload blank pageset and process
     st.header("Step 3: Create TD Snap Pageset")
 
@@ -298,7 +344,9 @@ if pptx_file is not None:
         st.session_state.uploaded_spb_file = uploaded_file
 
     db_file = st.session_state.uploaded_spb_file
-    st.info("👆 Upload a blank TD Snap file to add buttons")
+
+    if db_file is None:
+        st.info("👆 Upload a blank TD Snap file to add buttons")
 
     # Create a log expander for processing visibility
     log_expander = st.expander("Show Processing Logs", expanded=False)
@@ -312,23 +360,26 @@ if pptx_file is not None:
         file_name, _ = os.path.splitext(pptx_file.name)
         pageset_title = st.text_input("Pageset name:", value=file_name)
 
-    # Check for existing buttons and show warning if needed
+    # Check for existing buttons and grid capacity
     proceed_with_existing = True
     button_count = 0
     button_samples = []
+    grid_capacity = None
 
     if db_file is not None:
-        # Only check buttons if this is a new/different file
+        # Only check buttons and capacity if this is a new/different file
         current_file_name = db_file.name if hasattr(db_file, 'name') else str(db_file)
         if st.session_state.spb_file_name != current_file_name:
-            # Create temp file to check for existing buttons
+            # Create temp file to check for existing buttons and capacity
             temp_check_path = create_temp_file(db_file)
             button_count, button_samples = check_existing_buttons(temp_check_path)
+            grid_capacity = get_grid_capacity(temp_check_path)
 
             # Cache the results
             st.session_state.spb_file_name = current_file_name
             st.session_state.cached_button_count = button_count
             st.session_state.cached_button_samples = button_samples
+            st.session_state.grid_capacity_info = grid_capacity
 
             # Clean up temp file
             try:
@@ -339,6 +390,19 @@ if pptx_file is not None:
             # Use cached values
             button_count = st.session_state.cached_button_count
             button_samples = st.session_state.cached_button_samples
+            grid_capacity = st.session_state.grid_capacity_info
+
+        # Display grid capacity info
+        if grid_capacity is not None:
+            st.info(
+                f"📊 **Grid Capacity**\n\n"
+                f"- Grid size: {grid_capacity['ncols']} columns × {grid_capacity['nrows']} rows "
+                f"({grid_capacity['cells_per_page']} cells per page)\n"
+                f"- Pages: {grid_capacity['total_pages']}\n"
+                f"- Total available: **{grid_capacity['available_cells']} cells** "
+                f"({grid_capacity['reserved_cells']} reserved for navigation)\n"
+                f"- Currently occupied: {grid_capacity['occupied_cells']} cells"
+            )
 
         if button_count > 0:
             # Format: "X buttons found:"
@@ -365,8 +429,16 @@ if pptx_file is not None:
             st.session_state.proceed_with_existing = checkbox_value
             proceed_with_existing = checkbox_value
 
-    # Process button (only enabled if no existing buttons or user confirmed)
-    button_disabled = button_count > 0 and not st.session_state.proceed_with_existing
+    # Process button (only enabled if no existing buttons or user confirmed, AND not over capacity)
+    over_capacity = False
+    if grid_capacity is not None and st.session_state.total_button_count > 0:
+        over_capacity = st.session_state.total_button_count > grid_capacity['available_cells']
+
+    button_disabled = (button_count > 0 and not st.session_state.proceed_with_existing) or over_capacity
+
+    # Show capacity warning if that's why button is disabled
+    if over_capacity and db_file is not None:
+        st.warning("⚠️ Cannot create pageset: too many buttons for available grid space. See capacity warning above.")
 
     if db_file is not None and not button_disabled and st.button("Create Pageset", type="primary"):
         try:
