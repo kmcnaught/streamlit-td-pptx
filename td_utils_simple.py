@@ -372,45 +372,51 @@ def add_buttons_from_pptx(db_path, buttons_data):
         # Get page and layout info
         pageId, layouts = get_page_layout_details(db_path)
 
+        # Validate space availability for first layout (assume same for all)
+        first_layout = layouts[0]
+        layoutId, ncols, nrows = first_layout
+        available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
+
+        if len(available_positions) < len(buttons_data):
+            raise ValueError(f"Not enough grid space. Need {len(buttons_data)} positions, only {len(available_positions)} available.")
+
         # Get starting IDs
         buttonId = get_next_id(cursor, 'Button')
         refId = get_next_id(cursor, 'ElementReference')
 
-        buttons_added = 0
+        # Add buttons, commands, and element references ONCE
+        for i, (label, message, slide_num) in enumerate(buttons_data):
+            print(f"Adding button: {label} (Slide {slide_num})")
+            current_buttonId = buttonId + i
+            current_refId = refId + i
 
+            # Get color for this slide
+            color = get_color_for_slide(slide_num)
+
+            # Add button (no symbol)
+            add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
+
+            # Add speak message command
+            add_command_speak_message(cursor, current_buttonId)
+
+            # Add element reference with slide color
+            add_element_reference(cursor, current_refId, pageId, color)
+
+        # Add button placements for EACH layout
         for layoutId, ncols, nrows in layouts:
             # Find available positions for this layout
             available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
 
-            if len(available_positions) < len(buttons_data):
-                raise ValueError(f"Not enough grid space. Need {len(buttons_data)} positions, only {len(available_positions)} available.")
-
-            # Add buttons
+            # Add placement for each button
             for i, (label, message, slide_num) in enumerate(buttons_data):
-                print(f"Adding button: {label} (Slide {slide_num})")
-                current_buttonId = buttonId + i
                 current_refId = refId + i
                 position = available_positions[i]
-
-                # Get color for this slide
-                color = get_color_for_slide(slide_num)
-
-                # Add button (no symbol)
-                add_button(cursor, current_buttonId, current_refId, label, message, symbol=None)
-
-                # Add speak message command
-                add_command_speak_message(cursor, current_buttonId)
-
-                # Add element reference with slide color
-                add_element_reference(cursor, current_refId, pageId, color)
 
                 # Add button placement
                 add_button_placement(cursor, layoutId, current_refId, position)
 
-                buttons_added += 1
-
         conn.commit()
-        return buttons_added
+        return len(buttons_data)
 
     except Exception as e:
         conn.rollback()
