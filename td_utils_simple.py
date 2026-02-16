@@ -251,6 +251,31 @@ def update_page_title(db_path, new_name, page_set_id=1):
         conn.close()
 
 
+def update_page_grid_dimension(db_path, grid_dimension=None):
+    """
+    Update Page.GridDimension field.
+
+    Args:
+        db_path: Path to TD Snap database
+        grid_dimension: String like "3,3" or None/NULL to match PageSet setting
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        # Find the main page (excluding Dashboard/Message Bar)
+        cursor.execute("SELECT Id FROM Page WHERE Title NOT IN ('Dashboard', 'Message Bar')")
+        page_row = cursor.fetchone()
+
+        if page_row:
+            page_id = page_row[0]
+            cursor.execute("UPDATE Page SET GridDimension = ? WHERE Id = ?", (grid_dimension, page_id))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def check_existing_buttons(db_filename):
     """
     Check if buttons already exist in database.
@@ -313,8 +338,10 @@ def get_grid_capacity(db_path):
         # (different layouts may have different numbers of occupied cells)
         min_available = float('inf')
         max_occupied = 0
+        limiting_layout_index = 0
+        layout_info = []
 
-        for layoutId, layout_ncols, layout_nrows in layouts:
+        for idx, (layoutId, layout_ncols, layout_nrows) in enumerate(layouts):
             available_positions = find_available_positions(db_path, layoutId, layout_ncols, layout_nrows)
             num_available = len(available_positions)
 
@@ -325,13 +352,25 @@ def get_grid_capacity(db_path):
             )
             occupied = cursor.fetchone()[0]
 
+            # Track minimum available
             if num_available < min_available:
                 min_available = num_available
+                limiting_layout_index = idx
 
             if occupied > max_occupied:
                 max_occupied = occupied
 
-        # Calculate cells per page
+            # Store layout info
+            layout_info.append({
+                'id': layoutId,
+                'ncols': layout_ncols,
+                'nrows': layout_nrows,
+                'cells_per_page': layout_ncols * layout_nrows,
+                'available_cells': num_available,
+                'occupied_cells': occupied
+            })
+
+        # Calculate cells per page for first layout (for backward compatibility)
         cells_per_page = ncols * nrows
 
         return {
@@ -341,7 +380,9 @@ def get_grid_capacity(db_path):
             'reserved_cells': reserved_cells,
             'occupied_cells': max_occupied,
             'available_cells': min_available,
-            'cells_per_page': cells_per_page
+            'cells_per_page': cells_per_page,
+            'layouts': layout_info,
+            'limiting_layout_index': limiting_layout_index
         }
 
     finally:
@@ -422,13 +463,14 @@ def add_home_button(pageset_db_filename, reference_db_filename):
         conn_pageset.close()
 
 
-def add_buttons_from_pptx(db_path, buttons_data):
+def add_buttons_from_pptx(db_path, buttons_data, selected_layout_ids=None):
     """
     Add buttons to TD Snap database from PowerPoint data.
 
     Args:
         db_path: Path to TD Snap database
         buttons_data: List of tuples (label, message, slide_num)
+        selected_layout_ids: List of layout IDs to populate (default None means all layouts)
 
     Returns:
         Number of buttons added
@@ -443,11 +485,16 @@ def add_buttons_from_pptx(db_path, buttons_data):
         # Get page and layout info
         pageId, layouts = get_page_layout_details(db_path)
 
-        # Validate space availability for ALL layouts (must check each one)
+        # Filter to selected layouts (or all if none specified)
+        layouts_to_use = layouts if selected_layout_ids is None else [
+            (lid, nc, nr) for lid, nc, nr in layouts if lid in selected_layout_ids
+        ]
+
+        # Validate space availability for SELECTED layouts only
         min_available = float('inf')
         limiting_layout = None
 
-        for layoutId, ncols, nrows in layouts:
+        for layoutId, ncols, nrows in layouts_to_use:
             available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
             if len(available_positions) < min_available:
                 min_available = len(available_positions)
@@ -462,7 +509,6 @@ def add_buttons_from_pptx(db_path, buttons_data):
                 f"Shortage: {shortage} cells\n\n"
                 f"Solutions:\n"
                 f"- Reduce split level (use fewer buttons per slide)\n"
-                f"- Remove some slides from your PowerPoint\n"
                 f"- Use a blank pageset with a larger grid"
             )
 
@@ -488,8 +534,8 @@ def add_buttons_from_pptx(db_path, buttons_data):
             # Add element reference with slide color
             add_element_reference(cursor, current_refId, pageId, color)
 
-        # Add button placements for EACH layout
-        for layoutId, ncols, nrows in layouts:
+        # Add button placements for SELECTED layouts only
+        for layoutId, ncols, nrows in layouts_to_use:
             # Find available positions for this layout
             available_positions = find_available_positions(db_path, layoutId, ncols, nrows)
 

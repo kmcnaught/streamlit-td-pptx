@@ -14,8 +14,35 @@ from td_utils_simple import (
     update_page_title,
     add_buttons_from_pptx,
     check_existing_buttons,
-    get_grid_capacity
+    get_grid_capacity,
+    update_page_grid_dimension
 )
+
+
+def get_selected_layout_capacity(grid_capacity, selected_layout_ids):
+    """
+    Calculate minimum available cells among selected layouts.
+
+    Args:
+        grid_capacity: Grid capacity dict from get_grid_capacity()
+        selected_layout_ids: List of selected layout IDs
+
+    Returns:
+        int: Minimum available cells among selected layouts
+    """
+    if not selected_layout_ids or not grid_capacity or 'layouts' not in grid_capacity:
+        return 0
+
+    selected_layouts = [
+        layout for layout in grid_capacity['layouts']
+        if layout['id'] in selected_layout_ids
+    ]
+
+    if not selected_layouts:
+        return 0
+
+    return min(layout['available_cells'] for layout in selected_layouts)
+
 
 # Initialize session state
 if 'slides_data' not in st.session_state:
@@ -46,6 +73,8 @@ if 'grid_capacity_info' not in st.session_state:
     st.session_state.grid_capacity_info = None
 if 'total_button_count' not in st.session_state:
     st.session_state.total_button_count = 0
+if 'selected_layout_ids' not in st.session_state:
+    st.session_state.selected_layout_ids = None
 
 
 def get_split_level_name(level: int) -> str:
@@ -303,7 +332,13 @@ if pptx_file is not None:
         # Show capacity check if .spb file is uploaded
         if st.session_state.grid_capacity_info is not None:
             capacity = st.session_state.grid_capacity_info
-            available = capacity['available_cells']
+
+            # Use selected layouts capacity if layouts are selected, otherwise use all layouts
+            if 'selected_layout_ids' in st.session_state and st.session_state.selected_layout_ids:
+                available = get_selected_layout_capacity(capacity, st.session_state.selected_layout_ids)
+            else:
+                available = capacity['available_cells']
+
             usage_percent = (total_button_count / available * 100) if available > 0 else 100
 
             if total_button_count <= available:
@@ -317,16 +352,6 @@ if pptx_file is not None:
                         f"⚠️ **Getting close to capacity**: Using {total_button_count} of {available} available cells "
                         f"({usage_percent:.0f}%)"
                     )
-            else:
-                shortage = total_button_count - available
-                st.error(
-                    f"❌ **Over capacity!** Need {total_button_count} cells, only {available} available. "
-                    f"Shortage: {shortage} cells\n\n"
-                    f"**Solutions:**\n"
-                    f"- Reduce split level (use fewer buttons per slide)\n"
-                    f"- Remove some slides from your PowerPoint\n"
-                    f"- Use a blank pageset with a larger grid"
-                )
 
     # Step 3: Upload blank pageset and process
     st.header("Step 3: Create TD Snap Pageset")
@@ -337,10 +362,6 @@ if pptx_file is not None:
     uploaded_file = st.session_state.spb_uploader
 
     if uploaded_file is not None:
-        # Only reset checkbox if this is a different file
-        if (st.session_state.uploaded_spb_file is None or
-            uploaded_file.name != st.session_state.uploaded_spb_file.name):
-            st.session_state.proceed_with_existing = False
         st.session_state.uploaded_spb_file = uploaded_file
 
     db_file = st.session_state.uploaded_spb_file
@@ -361,7 +382,6 @@ if pptx_file is not None:
         pageset_title = st.text_input("Pageset name:", value=file_name)
 
     # Check for existing buttons and grid capacity
-    proceed_with_existing = True
     button_count = 0
     button_samples = []
     grid_capacity = None
@@ -381,6 +401,9 @@ if pptx_file is not None:
             st.session_state.cached_button_samples = button_samples
             st.session_state.grid_capacity_info = grid_capacity
 
+            # Reset selected layouts for new file
+            st.session_state.selected_layout_ids = None
+
             # Clean up temp file
             try:
                 os.remove(temp_check_path)
@@ -396,45 +419,95 @@ if pptx_file is not None:
         if grid_capacity is not None:
             st.info(
                 f"📊 **Grid Capacity**\n\n"
-                f"- Grid size: {grid_capacity['ncols']} columns × {grid_capacity['nrows']} rows "
-                f"({grid_capacity['cells_per_page']} cells per page)\n"
-                f"- Pages: {grid_capacity['total_pages']}\n"
-                f"- Total available: **{grid_capacity['available_cells']} cells** "
-                f"({grid_capacity['reserved_cells']} reserved for navigation)\n"
+                f"- Total pages: {grid_capacity['total_pages']}\n"
+                f"- Reserved cells: {grid_capacity['reserved_cells']} (for navigation)\n"
                 f"- Currently occupied: {grid_capacity['occupied_cells']} cells"
             )
 
+        # Display available layouts for selection
+        if grid_capacity and 'layouts' in grid_capacity:
+            st.subheader("Target Device Layouts")
+            st.markdown("Select which device layouts to add buttons to:")
+
+            # Get current button count
+            total_buttons = st.session_state.total_button_count
+
+            # Initialize session state for selected layouts (default: all layouts that have enough space)
+            if (st.session_state.selected_layout_ids is None or
+                not st.session_state.selected_layout_ids):
+                st.session_state.selected_layout_ids = [
+                    layout['id'] for layout in grid_capacity['layouts']
+                    if layout['available_cells'] >= total_buttons
+                ]
+
+            # Create a new list to track checkbox changes
+            new_selected_ids = []
+
+            for layout in grid_capacity['layouts']:
+                layout_id = layout['id']
+                ncols = layout['ncols']
+                nrows = layout['nrows']
+                available = layout['available_cells']
+
+                # Check if this layout has enough space
+                has_enough_space = available >= total_buttons
+
+                # Checkbox label with available cells
+                checkbox_label = f"{ncols}×{nrows} grid ({available} cells available)"
+
+                # Use checkbox with disabled state if not enough space
+                # Force unchecked (value=False) when disabled
+                checked = st.checkbox(
+                    checkbox_label,
+                    value=has_enough_space and (layout_id in st.session_state.selected_layout_ids),
+                    key=f"layout_{layout_id}",
+                    disabled=not has_enough_space
+                )
+
+                # Only add to selection if has enough space AND checked
+                if checked and has_enough_space:
+                    new_selected_ids.append(layout_id)
+
+                # Show warning if not enough space
+                if not has_enough_space:
+                    shortage = total_buttons - available
+                    st.caption(
+                        f"⚠️ Not enough space for all {total_buttons} buttons "
+                        f"(short by {shortage} cells). Reduce splitting if you want to use this layout."
+                    )
+
+            # Update session state with new selection
+            st.session_state.selected_layout_ids = new_selected_ids
+
+            # Warn if no layouts selected
+            if not st.session_state.selected_layout_ids:
+                st.warning("⚠️ Please select at least one layout")
+
         if button_count > 0:
-            # Format: "X buttons found:"
-            st.warning(f"⚠️ {button_count} button{'s' if button_count != 1 else ''} found:")
+            # Build compact message: "X existing button(s) found: Label1, Label2, ... + X more"
+            button_word = "existing button" if button_count == 1 else "existing buttons"
+            labels_text = ", ".join(button_samples[:3])
 
-            # Show all if <= 3, otherwise show first 3 with "more" indicator
-            st.write("**Existing buttons:**")
-            if button_count <= 3:
-                for label in button_samples:
-                    st.write(f"- {label}")
-            else:
-                for label in button_samples[:3]:
-                    st.write(f"- {label}")
+            if button_count > 3:
                 remaining = button_count - 3
-                st.write(f"... + {remaining} more button{'s' if remaining != 1 else ''}")
+                more_text = f", ... + {remaining} more"
+                warning_msg = f"⚠️ {button_count} {button_word} found: {labels_text}{more_text}\n\nExisting buttons will remain and new buttons added to empty cells"
+            else:
+                warning_msg = f"⚠️ {button_count} {button_word} found: {labels_text}\n\nExisting buttons will remain and new buttons added to empty cells"
 
-            st.write("")  # Add spacing
-
-            # Update session state from checkbox (no key to avoid conflicts)
-            checkbox_value = st.checkbox(
-                "I understand this will add buttons to existing content, using only empty cells",
-                value=st.session_state.proceed_with_existing
-            )
-            st.session_state.proceed_with_existing = checkbox_value
-            proceed_with_existing = checkbox_value
+            st.warning(warning_msg)
 
     # Process button (only enabled if no existing buttons or user confirmed, AND not over capacity)
     over_capacity = False
     if grid_capacity is not None and st.session_state.total_button_count > 0:
-        over_capacity = st.session_state.total_button_count > grid_capacity['available_cells']
+        if 'selected_layout_ids' in st.session_state and st.session_state.selected_layout_ids:
+            available = get_selected_layout_capacity(grid_capacity, st.session_state.selected_layout_ids)
+            over_capacity = st.session_state.total_button_count > available
+        else:
+            # No layouts selected → can't proceed
+            over_capacity = True
 
-    button_disabled = (button_count > 0 and not st.session_state.proceed_with_existing) or over_capacity
+    button_disabled = over_capacity
 
     # Show capacity warning if that's why button is disabled
     if over_capacity and db_file is not None:
@@ -496,9 +569,29 @@ if pptx_file is not None:
                 progress_text.text(f"➕ Adding {len(buttons_data)} buttons to pageset...")
                 progress_bar.progress(50)
                 log_expander.write(f"➕ Adding {len(buttons_data)} buttons to available positions...")
-                num_added = add_buttons_from_pptx(temp_db_path, buttons_data)
+                num_added = add_buttons_from_pptx(
+                    temp_db_path,
+                    buttons_data,
+                    selected_layout_ids=st.session_state.selected_layout_ids
+                )
                 progress_bar.progress(70)
                 log_expander.write(f"✅ Successfully added {num_added} buttons")
+
+                # Update Page.GridDimension based on selection
+                all_layout_ids = [layout['id'] for layout in grid_capacity['layouts']]
+                if st.session_state.selected_layout_ids == all_layout_ids:
+                    # All layouts selected → NULL
+                    update_page_grid_dimension(temp_db_path, grid_dimension=None)
+                    log_expander.write("📐 Set Page.GridDimension to NULL (all layouts)")
+                else:
+                    # Find last selected layout's dimensions
+                    last_layout = next(
+                        layout for layout in reversed(grid_capacity['layouts'])
+                        if layout['id'] in st.session_state.selected_layout_ids
+                    )
+                    grid_dim = f"{last_layout['ncols']},{last_layout['nrows']}"
+                    update_page_grid_dimension(temp_db_path, grid_dimension=grid_dim)
+                    log_expander.write(f"📐 Set Page.GridDimension to {grid_dim}")
 
                 # Step 5: Update title
                 if update_title and pageset_title:
